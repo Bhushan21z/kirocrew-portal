@@ -37,7 +37,7 @@ cloudflared.
 | kc-auth runs as | systemd user service `kc-auth.service` | launchd agent `com.kc-remote-access.kc-auth` |
 | Container networking | host networking (`docker-compose.yml`) | normal Docker network plus `host.docker.internal` (`docker-compose.mac.yml`, selected by `setup.sh`) |
 | Cloudflare Public Hostname URL | `localhost:4180` | `oauth2-proxy:4180` |
-| Keeps running | at boot, after `sudo loginctl enable-linger $USER` | while you are logged in; starts at login |
+| Keeps running | starts at boot (see [Start at boot](#start-at-boot)) | starts at login (see [Start at boot](#start-at-boot)) |
 | kc-auth logs | `journalctl --user -u kc-auth.service -f` | `tail -f ~/Library/Logs/kc-auth.log` |
 
 macOS support is new. If something fails on a Mac, the two places to look are
@@ -142,21 +142,13 @@ authorized redirect URIs. Generate a new `OAUTH2_COOKIE_SECRET` per machine.
 ./setup.sh
 ```
 
-It checks `.env` and the prerequisites, writes `authenticated-emails.txt`,
+It checks `.env` and the prerequisites, writes `allowlist/authenticated-emails.txt`,
 installs and starts kc-auth (systemd on Linux, launchd on macOS), waits for it
 to answer, and starts the containers. On macOS it also adds
 `COMPOSE_FILE=docker-compose.yml:docker-compose.mac.yml` to `.env`, so plain
 `docker compose` commands in this directory use the Mac override. It is safe
-to run again after changing `.env`.
-
-**Linux:** to keep kc-auth running after you log out, and start it at boot:
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
-
-**macOS:** kc-auth starts when you log in. Set Docker Desktop to start at login
-(Settings → General) so the containers come back after a reboot.
+to run again after changing `.env`. At the end it runs the start-at-boot check
+described in [Start at boot](#start-at-boot) and tells you what is missing.
 
 ### 8. Tell Kiro Crew its public URL
 
@@ -184,15 +176,66 @@ from the public URL is rejected and the UI keeps going offline.
 
 `TOKEN_TTL` in `.env` sets how long each token lasts.
 
+## Changing who can log in
+
+No restart is needed, and neither is `./setup.sh up`.
+
+1. Add or remove the address in `allowlist/authenticated-emails.txt`, one per
+   line. oauth2-proxy and kc-auth both pick up the change within seconds.
+2. Make the same change to `ALLOWED_EMAILS` in `.env`. `./setup.sh install`
+   rebuilds the file from that list, so an address that is only in the file
+   disappears at the next install.
+
+A removed user's existing oauth2-proxy login stops working on their next
+request. A Kiro Crew token they already pasted into the dashboard stays valid
+until it expires (`TOKEN_TTL`).
+
+## Turning it off and on
+
+```bash
+./setup.sh down     # take the public URL offline
+./setup.sh up       # bring it back
+./setup.sh status   # what is running, and whether it starts at boot
+```
+
+`down` stops kc-auth, oauth2-proxy and cloudflared, and keeps them off after a
+reboot. The Kiro Crew gateway itself keeps running for local use; only the
+public URL goes offline. `up` starts everything again and turns start-at-boot
+back on. Neither command reinstalls anything; after editing `.env`, run
+`./setup.sh` (install) instead.
+
+## Start at boot
+
+After `./setup.sh`, everything is set to start on its own, so the URL works
+after a reboot without you doing anything. Each piece has its own mechanism:
+
+| Piece | Linux | macOS |
+|---|---|---|
+| kc-auth | systemd user service, enabled | launchd agent, `RunAtLoad` |
+| oauth2-proxy, cloudflared | Docker restart policy `unless-stopped` | same |
+| Docker | `docker` system service | Docker Desktop's "Start when you sign in" setting |
+| Kiro Crew gateway | `kirocrew service install` | `kirocrew service install` |
+| Without logging in | needs lingering: `sudo loginctl enable-linger $USER` | needs automatic login (System Settings → Users & Groups) |
+
+`./setup.sh status` (and the end of every install) checks each row and prints
+the command to fix anything missing. On a Mac, launchd agents and Docker
+Desktop start when you **log in**, not at power-on, so a Mac that must come
+back unattended after a power cut needs automatic login turned on.
+
+The containers come back only if they still exist: `./setup.sh down` removes
+them on purpose, and `./setup.sh up` recreates them.
+
 ## Managing it
 
 | Task | Linux | macOS |
 |---|---|---|
-| Add or remove an allowed email | Edit `authenticated-emails.txt` (reloads on save), and update `ALLOWED_EMAILS` so a re-run of `setup.sh` keeps it | same |
+| Add or remove an allowed email | see [Changing who can log in](#changing-who-can-log-in) | same |
 | Container logs | `docker compose logs -f` | same |
 | kc-auth logs | `journalctl --user -u kc-auth.service -f` | `tail -f ~/Library/Logs/kc-auth.log` |
 | Restart kc-auth | `systemctl --user restart kc-auth.service` | `launchctl kickstart -k gui/$(id -u)/com.kc-remote-access.kc-auth` |
-| Stop everything | `docker compose down && systemctl --user stop kc-auth.service` | `docker compose down && launchctl bootout gui/$(id -u)/com.kc-remote-access.kc-auth` |
+| Stop everything, stay off after reboot | `./setup.sh down` | same |
+| Start everything again | `./setup.sh up` | same |
+| Check status and start-at-boot | `./setup.sh status` | same |
 | Uninstall kc-auth | `systemctl --user disable --now kc-auth.service && rm ~/.config/systemd/user/kc-auth.service && systemctl --user daemon-reload` | `launchctl bootout gui/$(id -u)/com.kc-remote-access.kc-auth; rm ~/Library/LaunchAgents/com.kc-remote-access.kc-auth.plist` |
 
 ## Troubleshooting
@@ -204,6 +247,8 @@ from the public URL is rejected and the UI keeps going offline.
 | macOS: 502 from oauth2-proxy, logs show `host.docker.internal` connection refused | Docker Desktop is not forwarding to the Mac's loopback, or the gateway/kc-auth is not running. Check `curl http://127.0.0.1:5476/` and `curl http://127.0.0.1:3000/kc-auth/health` on the Mac, and that `COMPOSE_FILE` in `.env` includes `docker-compose.mac.yml`. |
 | Any Google account gets in | Something set `OAUTH2_PROXY_EMAIL_DOMAINS`. Remove it; the allowlist file must be the only email gate. |
 | `/kc-auth/token` returns 500 | `kirocrew token` failed. Check the kc-auth logs (see Managing it) and that the gateway is running. |
+| `/kc-auth/token` returns 401 while you are logged in | kc-auth did not accept the Google ID token. Its log line `Token refused: ...` says why. `no Google ID token in Authorization header` means oauth2-proxy is not forwarding it: check `OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER` in `docker-compose.yml`. If you logged in before this check existed, sign out at `https://<DOMAIN>/oauth2/sign_out` and back in. |
+| `/kc-auth/token` returns 503 | kc-auth could not download Google's signing keys from `www.googleapis.com`. Check the machine's internet access. |
 | Dashboard keeps reconnecting | `dashboard.url` is not set to `https://<DOMAIN>` (step 8), or you did not run `kirocrew restart`. |
 | Settings pages refuse to save | Expected. Kiro Crew refuses config writes and secret reveals on proxied requests. Change settings locally or over SSH. |
 
@@ -214,16 +259,16 @@ Read these before you share access.
 - **Every allowed user gets a full owner session.** Tokens from `kirocrew token`
   are owner tokens; Kiro Crew has no per-user scoping behind a proxy. The
   Google allowlist is your access control, so keep it short.
-- **kc-auth trusts the `X-Forwarded-Email` header.** oauth2-proxy sets it for
-  outside requests, but any program on this machine can call
-  `127.0.0.1:<KC_AUTH_PORT>/kc-auth/token` with a made-up header and get an
-  owner token. That includes agent sessions your Kiro Crew gateway runs.
-  Anyone with a shell on the machine already has owner access, but agents are
-  normally blocked from minting tokens and this endpoint removes that block.
-  Verifying the Google ID token in kc-auth (oauth2-proxy can forward it with
-  `OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER=true`) would close the gap.
-  On macOS the reach is wider: any container on the Mac's Docker Desktop can
-  call `host.docker.internal:<KC_AUTH_PORT>`, so do not run untrusted
-  containers on that Mac.
+- **kc-auth checks the Google login itself.** Its port is reachable by every
+  program on the machine (and, on macOS, by every container through
+  `host.docker.internal`), so it does not trust headers. oauth2-proxy forwards
+  the user's Google ID token, and kc-auth mints a token only when that token
+  is signed by Google, was issued for your `GOOGLE_CLIENT_ID`, has not
+  expired, and names a verified email that is in `allowlist/authenticated-emails.txt`.
+  A made-up `X-Forwarded-Email` header gets a 401.
+- **What the check does not cover.** A program running as your user can
+  still read `.env` and your Kiro Crew data directly, so this protects against
+  other machines, containers and sandboxed agents, not against code you run as
+  yourself.
 - `.env` holds your secrets. Keep it `chmod 600` and never commit it
   (`.gitignore` excludes it).

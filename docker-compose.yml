@@ -14,7 +14,7 @@
 # runs on the host as a systemd user service instead (setup.sh installs it).
 #
 # Every value comes from .env. Run ./setup.sh rather than `docker compose up`
-# directly: it validates .env and writes authenticated-emails.txt first.
+# directly: it validates .env and writes allowlist/authenticated-emails.txt first.
 
 name: kc-remote-access
 
@@ -33,7 +33,7 @@ services:
       # The allowlist file is the ONLY email gate. Never add
       # OAUTH2_PROXY_EMAIL_DOMAINS=*: it is OR'd with the file and lets any
       # Google account in.
-      OAUTH2_PROXY_AUTHENTICATED_EMAILS_FILE: /etc/oauth2-proxy/authenticated-emails.txt
+      OAUTH2_PROXY_AUTHENTICATED_EMAILS_FILE: /etc/oauth2-proxy/allowlist/authenticated-emails.txt
       OAUTH2_PROXY_COOKIE_SECURE: "true"
       OAUTH2_PROXY_COOKIE_DOMAINS: ${DOMAIN}
       OAUTH2_PROXY_COOKIE_EXPIRE: ${OAUTH2_COOKIE_EXPIRE:-168h}
@@ -42,11 +42,19 @@ services:
       OAUTH2_PROXY_REVERSE_PROXY: "true"
       OAUTH2_PROXY_UPSTREAMS: http://127.0.0.1:${KIROCREW_PORT:-5476}/,http://127.0.0.1:${KC_AUTH_PORT:-3000}/kc-auth/
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
+      # Forward the user's Google ID token as "Authorization: Bearer <jwt>".
+      # kc-auth mints a token only after verifying it, so a request that did
+      # not come through a real Google login cannot get one. oauth2-proxy
+      # sets this header itself; a client cannot supply its own.
+      OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_WHITELIST_DOMAINS: ${DOMAIN}
     volumes:
-      # oauth2-proxy watches this file and reloads it on every edit.
-      - ./authenticated-emails.txt:/etc/oauth2-proxy/authenticated-emails.txt:ro
+      # The FOLDER is mounted, not the file: a single-file mount pins the
+      # file's inode, so a file replaced on save (setup.sh, sed -i, many
+      # editors) would stay invisible to the running container. oauth2-proxy
+      # watches the file and reloads it on every change.
+      - ./allowlist:/etc/oauth2-proxy/allowlist:ro
 
   cloudflared:
     image: cloudflare/cloudflared:latest

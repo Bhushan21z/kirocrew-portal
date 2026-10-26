@@ -215,7 +215,7 @@ check_prerequisites() {
 
   # Another stack that already owns these container names would clash.
   local name project
-  for name in kc-oauth2-proxy kc-cloudflared; do
+  for name in kc-oauth2-proxy kc-login-redirect kc-cloudflared; do
     project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$name" 2>/dev/null || true)"
     if [[ -n "$project" && "$project" != "kc-remote-access" ]]; then
       die "container $name already exists from compose project '$project'. Stop that stack first (docker compose down in its directory)."
@@ -319,7 +319,7 @@ Remaining manual step (Kiro Crew blocks agents from editing this file):
   then run:  kirocrew restart
 
 Then open https://${DOMAIN} and sign in with an allowed Google account.
-Token for the dashboard: https://${DOMAIN}/kc-auth/token
+It lands you in the dashboard with no token to paste.
 EOF
 }
 

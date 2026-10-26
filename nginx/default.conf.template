@@ -1,0 +1,59 @@
+# Sits between oauth2-proxy and the Kiro Crew gateway. Its one job: a browser
+# that opens a dashboard page with no dashboard session yet is sent to
+# /kc-auth/login, which mints a token and comes back as /?token=..., so the
+# plain URL signs people in with no token prompt. Everything else is passed
+# through unchanged, including WebSockets and streamed responses.
+#
+# Only KC_* names are filled in from the environment (NGINX_ENVSUBST_FILTER in
+# docker-compose.yml); every other $name here is an nginx variable.
+
+# The gateway's session cookie is mc_token_<port>.
+map $http_cookie $kc_has_session {
+    default 0;
+    "~(^|;\s*)mc_token_\d+=" 1;
+}
+
+# Redirect only a top-level page load (Sec-Fetch-Dest: document) that carries
+# neither a session cookie nor a ?token=. API calls, scripts and WebSocket
+# upgrades never match, and /?token=... from kc-auth passes, so there is no loop.
+map "$request_method:$http_sec_fetch_dest:$kc_has_session:$arg_token" $kc_needs_login {
+    default 0;
+    "GET:document:0:" 1;
+}
+
+map $http_upgrade $kc_connection {
+    default upgrade;
+    "" "";
+}
+
+server {
+    listen ${KC_NGINX_LISTEN};
+    server_tokens off;
+    absolute_redirect off;
+    underscores_in_headers on;
+    client_max_body_size 0;
+
+    # Pass the request on as oauth2-proxy sent it: same Host, and the
+    # X-Forwarded-* headers untouched (nginx adds none of its own).
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $kc_connection;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_redirect off;
+    proxy_read_timeout 1d;
+    proxy_send_timeout 1d;
+
+    location /api/ {
+        proxy_pass http://${KC_GATEWAY_UPSTREAM};
+    }
+
+    location / {
+        if ($kc_needs_login) {
+            add_header Cache-Control "no-store" always;
+            return 302 /kc-auth/login;
+        }
+        proxy_pass http://${KC_GATEWAY_UPSTREAM};
+    }
+}

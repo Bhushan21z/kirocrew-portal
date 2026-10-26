@@ -4,8 +4,10 @@
 # Docker Desktop runs containers in a Linux VM, so `network_mode: host` would
 # be the VM's network, not the Mac's. Instead, both containers use the
 # project's normal network:
-#   - oauth2-proxy reaches the gateway and kc-auth on the Mac through
-#     host.docker.internal (Docker Desktop forwards it to the Mac's loopback).
+#   - oauth2-proxy reaches kc-auth, and login-redirect (nginx) reaches the
+#     gateway, on the Mac through host.docker.internal (Docker Desktop
+#     forwards it to the Mac's loopback). oauth2-proxy reaches login-redirect
+#     by service name.
 #   - cloudflared reaches oauth2-proxy by its service name, so the Cloudflare
 #     Public Hostname URL on a Mac is  http://oauth2-proxy:4180
 # No port is published to the Mac, so oauth2-proxy is reachable only by
@@ -18,7 +20,13 @@ services:
     network_mode: !reset null
     environment:
       OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
-      OAUTH2_PROXY_UPSTREAMS: http://host.docker.internal:${KIROCREW_PORT:-5476}/,http://host.docker.internal:${KC_AUTH_PORT:-3000}/kc-auth/
+      OAUTH2_PROXY_UPSTREAMS: http://login-redirect:8080/,http://host.docker.internal:${KC_AUTH_PORT:-3000}/kc-auth/
+
+  login-redirect:
+    network_mode: !reset null
+    environment:
+      KC_NGINX_LISTEN: 8080
+      KC_GATEWAY_UPSTREAM: host.docker.internal:${KIROCREW_PORT:-5476}
 
   cloudflared:
     network_mode: !reset null

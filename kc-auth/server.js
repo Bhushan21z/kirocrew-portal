@@ -1,8 +1,10 @@
 // Kiro Crew token API. Runs behind oauth2-proxy, which handles Google login + allowlist.
 //   GET /kc-auth/health -> {"ok": true}
 //   GET /kc-auth/token  -> {"token": "...", "email": "...", "expiresIn": "8h"}
+//   GET /kc-auth/login  -> 302 to /?token=..., which signs the browser in to
+//                          the dashboard in one step
 //
-// /kc-auth/token mints an OWNER token, so it does not trust headers alone: any
+// Both token routes mint an OWNER token, so it does not trust headers alone: any
 // local process (or, on macOS, any container via host.docker.internal) can
 // reach this port and set X-Forwarded-Email. oauth2-proxy forwards the user's
 // Google ID token as "Authorization: Bearer <jwt>" (PASS_AUTHORIZATION_HEADER),
@@ -146,6 +148,35 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+// Runs the Google ID-token check and mints a token. On failure it answers the
+// request itself and returns null.
+async function mintForRequest(req, res) {
+  let email;
+  try {
+    email = await verifyGoogleIdToken(req.headers["authorization"]);
+    const forwarded = String(req.headers["x-forwarded-email"] || "").toLowerCase();
+    if (forwarded && forwarded !== email) throw new AuthError("X-Forwarded-Email does not match the ID token");
+  } catch (e) {
+    if (e instanceof AuthError) {
+      console.warn(`Token refused: ${e.message}`);
+      sendJson(res, 401, { error: "Not authenticated" });
+      return null;
+    }
+    console.error("Token check failed:", e.message);
+    sendJson(res, 503, { error: "Could not verify login" });
+    return null;
+  }
+  try {
+    const token = await generateToken();
+    console.log(`Token issued for ${email}`);
+    return { token, email };
+  } catch (e) {
+    console.error("Token generation failed:", e.message);
+    sendJson(res, 500, { error: "Could not generate token" });
+    return null;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, "http://localhost");
 
@@ -153,28 +184,27 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ok: true });
   }
 
+  // JSON, for copying the token by hand.
   if (req.method === "GET" && pathname === "/kc-auth/token") {
-    let email;
-    try {
-      email = await verifyGoogleIdToken(req.headers["authorization"]);
-      const forwarded = String(req.headers["x-forwarded-email"] || "").toLowerCase();
-      if (forwarded && forwarded !== email) throw new AuthError("X-Forwarded-Email does not match the ID token");
-    } catch (e) {
-      if (e instanceof AuthError) {
-        console.warn(`Token refused: ${e.message}`);
-        return sendJson(res, 401, { error: "Not authenticated" });
-      }
-      console.error("Token check failed:", e.message);
-      return sendJson(res, 503, { error: "Could not verify login" });
+    const minted = await mintForRequest(req, res);
+    if (minted) sendJson(res, 200, { ...minted, expiresIn: TOKEN_TTL });
+    return;
+  }
+
+  // One-step entry point: send the browser straight into the dashboard with
+  // the token, which the gateway exchanges for its session cookie. The target
+  // is a fixed relative path, so this cannot be turned into an open redirect.
+  if (req.method === "GET" && pathname === "/kc-auth/login") {
+    const minted = await mintForRequest(req, res);
+    if (minted) {
+      res.writeHead(302, {
+        Location: `/?token=${encodeURIComponent(minted.token)}`,
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+      });
+      res.end();
     }
-    try {
-      const token = await generateToken();
-      console.log(`Token issued for ${email}`);
-      return sendJson(res, 200, { token, email, expiresIn: TOKEN_TTL });
-    } catch (e) {
-      console.error("Token generation failed:", e.message);
-      return sendJson(res, 500, { error: "Could not generate token" });
-    }
+    return;
   }
 
   sendJson(res, 404, { error: "Not found" });

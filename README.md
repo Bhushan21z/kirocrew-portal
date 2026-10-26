@@ -5,7 +5,7 @@ Put your Kiro Crew dashboard on a public HTTPS URL behind Google login:
 ```
 browser ─HTTPS─> Cloudflare ─tunnel─> cloudflared
    ─> oauth2-proxy :4180   (Google login, email allowlist)
-        /          ─> Kiro Crew gateway :5476
+        /          ─> login-redirect (nginx) :4190 ─> Kiro Crew gateway :5476
         /kc-auth/  ─> kc-auth token API :3000
 ```
 
@@ -14,9 +14,13 @@ browser ─HTTPS─> Cloudflare ─tunnel─> cloudflared
   NAT/CGNAT. Cloudflare provides the TLS certificate.
 - **oauth2-proxy** makes everyone sign in with Google and lets through only the
   addresses in your allowlist.
-- **kc-auth** is a small Node.js API. An allowed user opens `/kc-auth/token`
-  and gets a Kiro Crew dashboard token, minted on your machine with
-  `kirocrew token`.
+- **kc-auth** is a small Node.js API. An allowed user opens `/kc-auth/login`
+  and lands in the dashboard already signed in, with a token minted on your
+  machine with `kirocrew token`.
+- **login-redirect** is a small nginx between oauth2-proxy and the gateway.
+  When a browser opens a dashboard page with no dashboard session yet, it
+  sends it to `/kc-auth/login`, so the plain URL works without a token prompt.
+  Everything else passes through unchanged.
 
 Everything listens on `127.0.0.1` only. Runs on Linux and macOS.
 
@@ -176,17 +180,27 @@ from the public URL is rejected and the UI keeps going offline.
 
 ## Using it
 
-1. Open `https://<DOMAIN>` and sign in with an allowed Google account.
-2. When the dashboard asks for a token, open `https://<DOMAIN>/kc-auth/token`
-   in the same browser. It returns:
+Open `https://<DOMAIN>` and sign in with an allowed Google account. You land in
+the dashboard already signed in: login-redirect sees that the browser has no
+dashboard session and sends it through `https://<DOMAIN>/kc-auth/login`, which
+mints a token and returns to `https://<DOMAIN>/?token=...`. The dashboard
+exchanges that token for its own session cookie, so nobody copies or pastes a
+token. When the session lapses, the next page load goes through the same steps
+by itself.
 
-   ```json
-   {"token": "...", "email": "you@gmail.com", "expiresIn": "8h"}
-   ```
+`https://<DOMAIN>/kc-auth/login` does the same thing directly. If the dashboard
+ever shows its token prompt anyway (for example a cookie the gateway no longer
+accepts), open that link once.
 
-3. Paste the `token` value into the dashboard.
+To get the token as JSON instead, for example to paste it by hand, open
+`https://<DOMAIN>/kc-auth/token`:
 
-`TOKEN_TTL` in `.env` sets how long each token lasts.
+```json
+{"token": "...", "email": "you@gmail.com", "expiresIn": "8h"}
+```
+
+`TOKEN_TTL` in `.env` sets how long each token lasts. Each visit to either
+link mints a new token.
 
 ## Changing who can log in
 
@@ -264,6 +278,8 @@ them on purpose, and `./setup.sh up` recreates them.
 | macOS: 502 from oauth2-proxy, logs show `host.docker.internal` connection refused | Docker Desktop is not forwarding to the Mac's loopback, or the gateway/kc-auth is not running. Check `curl http://127.0.0.1:5476/` and `curl http://127.0.0.1:3000/kc-auth/health` on the Mac, and that `COMPOSE_FILE` in `.env` includes `docker-compose.mac.yml`. |
 | Any Google account gets in | Something set `OAUTH2_PROXY_EMAIL_DOMAINS` to `*`. It must come only from `ALLOWED_DOMAINS` in `.env`, which `setup.sh` checks. |
 | A domain user gets past login but `/kc-auth/token` returns 401 | kc-auth was not restarted after `ALLOWED_DOMAINS` changed. Run `./setup.sh install`. |
+| 502 after login, or the dashboard never loads | Check `docker compose logs login-redirect`. It must reach the gateway on `127.0.0.1:${KIROCREW_PORT}` (Linux) or `host.docker.internal:${KIROCREW_PORT}` (macOS). |
+| `/kc-auth/login` shows `{"error": ...}` instead of the dashboard | Same causes as the `/kc-auth/token` rows below: 401 is the login check, 500 is the token mint, 503 is Google's keys. |
 | `/kc-auth/token` returns 500 | `kirocrew token` failed. Check the kc-auth logs (see Managing it) and that the gateway is running. |
 | `/kc-auth/token` returns 401 while you are logged in | kc-auth did not accept the Google ID token. Its log line `Token refused: ...` says why. `no Google ID token in Authorization header` means oauth2-proxy is not forwarding it: check `OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER` in `docker-compose.yml`. If you logged in before this check existed, sign out at `https://<DOMAIN>/oauth2/sign_out` and back in. |
 | `/kc-auth/token` returns 503 | kc-auth could not download Google's signing keys from `www.googleapis.com`. Check the machine's internet access. |

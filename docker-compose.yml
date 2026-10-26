@@ -2,10 +2,11 @@
 #
 #   browser --HTTPS--> Cloudflare edge --tunnel--> cloudflared
 #     --> oauth2-proxy 127.0.0.1:4180 (Google login + email allowlist)
-#           /         --> Kiro Crew gateway 127.0.0.1:${KIROCREW_PORT}
+#           /         --> login-redirect (nginx) 127.0.0.1:${KC_NGINX_PORT}
+#                           --> Kiro Crew gateway 127.0.0.1:${KIROCREW_PORT}
 #           /kc-auth/ --> kc-auth token API 127.0.0.1:${KC_AUTH_PORT} (host service)
 #
-# Both containers use host networking: the gateway and kc-auth bind 127.0.0.1
+# All three containers use host networking: the gateway and kc-auth bind 127.0.0.1
 # only, and a bridged container cannot reach the host's loopback.
 #
 # kc-auth is NOT in this file on purpose. It mints tokens with `kirocrew token`,
@@ -40,9 +41,14 @@ services:
       OAUTH2_PROXY_COOKIE_DOMAINS: ${DOMAIN}
       OAUTH2_PROXY_COOKIE_EXPIRE: ${OAUTH2_COOKIE_EXPIRE:-168h}
       OAUTH2_PROXY_COOKIE_REFRESH: ${OAUTH2_COOKIE_REFRESH:-1h}
+      # One CSRF cookie per login attempt. With a single shared cookie, two
+      # logins in one browser at once (two tabs, an expiring dashboard tab)
+      # overwrite each other and the first fails with "CSRF token mismatch".
+      OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST: "true"
+      OAUTH2_PROXY_COOKIE_CSRF_EXPIRE: 15m
       OAUTH2_PROXY_HTTP_ADDRESS: 127.0.0.1:4180
       OAUTH2_PROXY_REVERSE_PROXY: "true"
-      OAUTH2_PROXY_UPSTREAMS: http://127.0.0.1:${KIROCREW_PORT:-5476}/,http://127.0.0.1:${KC_AUTH_PORT:-3000}/kc-auth/
+      OAUTH2_PROXY_UPSTREAMS: http://127.0.0.1:${KC_NGINX_PORT:-4190}/,http://127.0.0.1:${KC_AUTH_PORT:-3000}/kc-auth/
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
       # Forward the user's Google ID token as "Authorization: Bearer <jwt>".
       # kc-auth mints a token only after verifying it, so a request that did
@@ -57,6 +63,23 @@ services:
       # editors) would stay invisible to the running container. oauth2-proxy
       # watches the file and reloads it on every change.
       - ./allowlist:/etc/oauth2-proxy/allowlist:ro
+    depends_on:
+      - login-redirect
+
+  # Between oauth2-proxy and the gateway: sends a browser with no dashboard
+  # session to /kc-auth/login, so the plain URL needs no token. See
+  # nginx/default.conf.template.
+  login-redirect:
+    image: nginx:1.27-alpine
+    container_name: kc-login-redirect
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NGINX_ENVSUBST_FILTER: ^KC_
+      KC_NGINX_LISTEN: 127.0.0.1:${KC_NGINX_PORT:-4190}
+      KC_GATEWAY_UPSTREAM: 127.0.0.1:${KIROCREW_PORT:-5476}
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
 
   cloudflared:
     image: cloudflare/cloudflared:latest

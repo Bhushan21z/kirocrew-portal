@@ -100,6 +100,18 @@ Set `ALLOWED_EMAILS` to a comma-separated list:
 ALLOWED_EMAILS=you@gmail.com,teammate@example.com
 ```
 
+To let in everyone at a company, set `ALLOWED_DOMAINS` to the domain, without
+the `@`:
+
+```
+ALLOWED_DOMAINS=example.com
+```
+
+Several domains are comma-separated, with no spaces. The match is exact: `example.com` does not
+cover `sub.example.com`. A user gets in when their email is in `ALLOWED_EMAILS`
+**or** ends in one of the domains. You can use either one alone, but not
+neither. `setup.sh` refuses `*`, which would let any Google account in.
+
 Only these accounts can get past the login.
 
 ### 6. Create the Cloudflare tunnel
@@ -186,6 +198,11 @@ No restart is needed, and neither is `./setup.sh up`.
    rebuilds the file from that list, so an address that is only in the file
    disappears at the next install.
 
+**Whole domains** (`ALLOWED_DOMAINS` in `.env`) are passed to oauth2-proxy and
+kc-auth when they start, so after changing them run `./setup.sh install`. It
+restarts kc-auth and recreates oauth2-proxy, which takes a few seconds; users
+who are already signed in stay signed in.
+
 A removed user's existing oauth2-proxy login stops working on their next
 request. A Kiro Crew token they already pasted into the dashboard stays valid
 until it expires (`TOKEN_TTL`).
@@ -245,7 +262,8 @@ them on purpose, and `./setup.sh up` recreates them.
 | Cloudflare **error 530** | The hostname is not bound to the tunnel. Check that its DNS record is a proxied CNAME to `<tunnel-id>.cfargotunnel.com`, not an `A` record. If cloudflared logs show no request lines, the edge never reached your tunnel. |
 | 502 or connection errors after login | The Public Hostname URL is wrong for your OS: `localhost:4180` on Linux, `oauth2-proxy:4180` on macOS. Check `docker compose logs cloudflared` for the service URL it received. |
 | macOS: 502 from oauth2-proxy, logs show `host.docker.internal` connection refused | Docker Desktop is not forwarding to the Mac's loopback, or the gateway/kc-auth is not running. Check `curl http://127.0.0.1:5476/` and `curl http://127.0.0.1:3000/kc-auth/health` on the Mac, and that `COMPOSE_FILE` in `.env` includes `docker-compose.mac.yml`. |
-| Any Google account gets in | Something set `OAUTH2_PROXY_EMAIL_DOMAINS`. Remove it; the allowlist file must be the only email gate. |
+| Any Google account gets in | Something set `OAUTH2_PROXY_EMAIL_DOMAINS` to `*`. It must come only from `ALLOWED_DOMAINS` in `.env`, which `setup.sh` checks. |
+| A domain user gets past login but `/kc-auth/token` returns 401 | kc-auth was not restarted after `ALLOWED_DOMAINS` changed. Run `./setup.sh install`. |
 | `/kc-auth/token` returns 500 | `kirocrew token` failed. Check the kc-auth logs (see Managing it) and that the gateway is running. |
 | `/kc-auth/token` returns 401 while you are logged in | kc-auth did not accept the Google ID token. Its log line `Token refused: ...` says why. `no Google ID token in Authorization header` means oauth2-proxy is not forwarding it: check `OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER` in `docker-compose.yml`. If you logged in before this check existed, sign out at `https://<DOMAIN>/oauth2/sign_out` and back in. |
 | `/kc-auth/token` returns 503 | kc-auth could not download Google's signing keys from `www.googleapis.com`. Check the machine's internet access. |
@@ -258,13 +276,16 @@ Read these before you share access.
 
 - **Every allowed user gets a full owner session.** Tokens from `kirocrew token`
   are owner tokens; Kiro Crew has no per-user scoping behind a proxy. The
-  Google allowlist is your access control, so keep it short.
+  Google allowlist is your access control, so keep it short. Allowing a whole
+  domain gives owner access to everyone with a Google account at that address,
+  including future employees and any shared or service mailboxes.
 - **kc-auth checks the Google login itself.** Its port is reachable by every
   program on the machine (and, on macOS, by every container through
   `host.docker.internal`), so it does not trust headers. oauth2-proxy forwards
   the user's Google ID token, and kc-auth mints a token only when that token
   is signed by Google, was issued for your `GOOGLE_CLIENT_ID`, has not
-  expired, and names a verified email that is in `allowlist/authenticated-emails.txt`.
+  expired, and names a verified email that is in `allowlist/authenticated-emails.txt`
+  or ends in one of `ALLOWED_DOMAINS`.
   A made-up `X-Forwarded-Email` header gets a 401.
 - **What the check does not cover.** A program running as your user can
   still read `.env` and your Kiro Crew data directly, so this protects against

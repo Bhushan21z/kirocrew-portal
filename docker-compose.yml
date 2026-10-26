@@ -30,10 +30,12 @@ services:
       OAUTH2_PROXY_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?set GOOGLE_CLIENT_SECRET in .env}
       OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_COOKIE_SECRET:?set OAUTH2_COOKIE_SECRET in .env}
       OAUTH2_PROXY_REDIRECT_URL: https://${DOMAIN:?set DOMAIN in .env}/oauth2/callback
-      # The allowlist file is the ONLY email gate. Never add
-      # OAUTH2_PROXY_EMAIL_DOMAINS=*: it is OR'd with the file and lets any
+      # A user is let in when their email is in the allowlist file OR ends in
+      # @<one of ALLOWED_DOMAINS>. Empty ALLOWED_DOMAINS counts as unset, so the
+      # file is then the only gate. setup.sh refuses `*`, which would let any
       # Google account in.
       OAUTH2_PROXY_AUTHENTICATED_EMAILS_FILE: /etc/oauth2-proxy/allowlist/authenticated-emails.txt
+      OAUTH2_PROXY_EMAIL_DOMAINS: ${ALLOWED_DOMAINS:-}
       OAUTH2_PROXY_COOKIE_SECURE: "true"
       OAUTH2_PROXY_COOKIE_DOMAINS: ${DOMAIN}
       OAUTH2_PROXY_COOKIE_EXPIRE: ${OAUTH2_COOKIE_EXPIRE:-168h}

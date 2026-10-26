@@ -7,7 +7,8 @@
 // reach this port and set X-Forwarded-Email. oauth2-proxy forwards the user's
 // Google ID token as "Authorization: Bearer <jwt>" (PASS_AUTHORIZATION_HEADER),
 // and a token is minted only when that JWT is signed by Google, issued for
-// GOOGLE_CLIENT_ID, unexpired, and names a verified email on the allowlist.
+// GOOGLE_CLIENT_ID, unexpired, and names a verified email that is on the
+// allowlist or ends in @<one of ALLOWED_DOMAINS> (exact domain, as oauth2-proxy).
 // No dependencies: Node 18+ (global fetch, JWK keys in node:crypto).
 const http = require("http");
 const crypto = require("crypto");
@@ -20,6 +21,12 @@ const KIROCREW_BIN = process.env.KIROCREW_BIN || "kirocrew";
 const TOKEN_TTL = process.env.TOKEN_TTL || "8h";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const ALLOWLIST_FILE = process.env.ALLOWLIST_FILE || "";
+const ALLOWED_DOMAINS = new Set(
+  (process.env.ALLOWED_DOMAINS || "")
+    .split(",")
+    .map((domain) => domain.trim().toLowerCase())
+    .filter(Boolean),
+);
 
 const GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISSUERS = new Set(["accounts.google.com", "https://accounts.google.com"]);
@@ -28,6 +35,10 @@ const MIN_CERT_REFETCH_MS = 60 * 1000;
 
 if (!GOOGLE_CLIENT_ID || !ALLOWLIST_FILE) {
   console.error("kc-auth: GOOGLE_CLIENT_ID and ALLOWLIST_FILE must be set");
+  process.exit(1);
+}
+if (ALLOWED_DOMAINS.has("*")) {
+  console.error("kc-auth: ALLOWED_DOMAINS must not contain *");
   process.exit(1);
 }
 
@@ -80,6 +91,12 @@ function allowedEmails() {
   return allowlist.emails;
 }
 
+function isAllowed(email) {
+  if (allowedEmails().has(email)) return true;
+  const at = email.lastIndexOf("@");
+  return at > 0 && ALLOWED_DOMAINS.has(email.slice(at + 1));
+}
+
 // --- ID token verification -------------------------------------------------
 class AuthError extends Error {}
 
@@ -120,7 +137,7 @@ async function verifyGoogleIdToken(authorization) {
   if (payload.email_verified !== true || typeof payload.email !== "string") throw new AuthError("email not verified");
 
   const email = payload.email.toLowerCase();
-  if (!allowedEmails().has(email)) throw new AuthError(`${email} is not on the allowlist`);
+  if (!isAllowed(email)) throw new AuthError(`${email} is not on the allowlist`);
   return email;
 }
 
